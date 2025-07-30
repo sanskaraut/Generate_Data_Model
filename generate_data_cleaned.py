@@ -1,4 +1,3 @@
-
 import open3d as o3d
 import numpy as np
 import matplotlib.pyplot as plt
@@ -13,11 +12,11 @@ from scipy.spatial import cKDTree
 import cv2
 
 # Load Healthy bone model
-model_path = "models/original/forarmbone.ply"
+model_path = "/home/user119/Generate_Data_Model/models/original/forarmbone.ply"
 mesh = o3d.io.read_triangle_mesh(model_path)
 
 if not mesh.has_triangles():
-    raise ValueError("Failed to load mesh from model_path")
+    raise ValueError(f"❌ Failed to load mesh from: {model_path}")
 
 # Preprocessing
 mesh.remove_duplicated_vertices()
@@ -26,21 +25,25 @@ mesh.remove_duplicated_triangles()
 mesh.remove_non_manifold_edges()
 mesh.remove_unreferenced_vertices()
 
-mesh.scale(1 / np.max(mesh.get_max_bound() - mesh.get_min_bound()), center=mesh.get_center())
+bbox_check = mesh.get_max_bound() - mesh.get_min_bound()
+if np.any(bbox_check == 0):
+    raise ValueError("❌ Invalid mesh dimensions (zero bounding box axis)")
+
+mesh.scale(1 / np.max(bbox_check), center=mesh.get_center())
 mesh.translate(-mesh.get_center())
 mesh.compute_vertex_normals()
 
 # Get Bounding Box
 bbox = mesh.get_axis_aligned_bounding_box()
 size = bbox.get_max_bound() - bbox.get_min_bound()
-
 plane_height, plane_depth = size[1], size[2]
+
 if plane_height <= 0 or plane_depth <= 0:
-    raise ValueError("Invalid bounding box size: height or depth is zero")
+    raise ValueError("❌ Invalid bounding box size: height or depth is zero")
 
 # Divide Mesh
 vertical_plane = o3d.geometry.TriangleMesh.create_box(width=0.001, height=plane_height, depth=plane_depth)
-vertical_plane.translate((-0.0005, -plane_height/2, -plane_depth/2))
+vertical_plane.translate((-0.0005, -plane_height / 2, -plane_depth / 2))
 
 center_x = (bbox.get_min_bound()[0] + bbox.get_max_bound()[0]) / 2
 vertical_plane.translate((center_x, 0, 0))
@@ -48,6 +51,7 @@ vertical_plane.translate((center_x, 0, 0))
 angle_from_x = 94.11222884471846
 tilt_angle = angle_from_x - 90
 angle_rad = np.deg2rad(-tilt_angle)
+
 R = vertical_plane.get_rotation_matrix_from_axis_angle([0, 0, angle_rad])
 vertical_plane.rotate(R, center=vertical_plane.get_center())
 vertical_plane.translate((-0.015, 0, 0))
@@ -65,12 +69,12 @@ mesh_ulna = mesh.select_by_index(np.where(mask_above)[0].tolist())
 mesh_radius = mesh.select_by_index(np.where(mask_below)[0].tolist())
 meshs = [mesh_ulna, mesh_radius]
 
-# Utility Functions
+# --- Utility Functions ---
+
 def create_angle_mesh(mesh, angles, split_ratio):
     vertices = np.asarray(mesh.vertices)
     triangles = np.asarray(mesh.triangles)
-    min_y = vertices[:, 1].min()
-    max_y = vertices[:, 1].max()
+    min_y, max_y = vertices[:, 1].min(), vertices[:, 1].max()
     mid_y = min_y + (max_y - min_y) * split_ratio
     top_mask = vertices[:, 1] >= mid_y
     bottom_mask = ~top_mask
@@ -236,7 +240,7 @@ def get_center_closest_lines_joined(mesh):
     surface = create_surface_between_lines(matched_coords1, matched_coords2)
     return line_set3, surface
 
-# Run loop to generate data
+# === Main Run Loop ===
 n = 1
 num_of_samples = 3000
 for _ in range(num_of_samples):
@@ -247,7 +251,7 @@ for _ in range(num_of_samples):
     line_set, surface_mesh = get_center_closest_lines_joined(mesh)
     mesh1 = mesh + surface_mesh
     model1_path = f"models/normal/bone{n}.ply"
-    # o3d.io.write_triangle_mesh(model1_path, mesh1)  # Disabled per your request
+    # o3d.io.write_triangle_mesh(model1_path, mesh1)  # Optional if you want to save healthy bone
     data = {
         "bone": bone,
         "location": split_ratio,
