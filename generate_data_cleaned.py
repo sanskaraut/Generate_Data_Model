@@ -11,52 +11,56 @@ import networkx as nx
 from scipy.spatial import cKDTree
 import cv2
 
-# Load Healthy bone model
+# === LOAD BASE BONE MODEL ===
 model_path = "/home/user119/Generate_Data_Model/models/original/forarmbone.ply"
 mesh = o3d.io.read_triangle_mesh(model_path)
 
+# Check if mesh is loaded properly
 if not mesh.has_triangles():
     raise ValueError(f"❌ Failed to load mesh from: {model_path}")
 
-# Preprocessing
+# === PREPROCESSING ===
 mesh.remove_duplicated_vertices()
 mesh.remove_degenerate_triangles()
 mesh.remove_duplicated_triangles()
 mesh.remove_non_manifold_edges()
 mesh.remove_unreferenced_vertices()
 
+# Validate bounding box
 bbox_check = mesh.get_max_bound() - mesh.get_min_bound()
 if np.any(bbox_check == 0):
     raise ValueError("❌ Invalid mesh dimensions (zero bounding box axis)")
 
+# Normalize and center mesh
 mesh.scale(1 / np.max(bbox_check), center=mesh.get_center())
 mesh.translate(-mesh.get_center())
 mesh.compute_vertex_normals()
 
-# Get Bounding Box
+# === BOUNDING BOX & MESH DIVISION PLANE ===
 bbox = mesh.get_axis_aligned_bounding_box()
 size = bbox.get_max_bound() - bbox.get_min_bound()
 plane_height, plane_depth = size[1], size[2]
 
+# Validate
 if plane_height <= 0 or plane_depth <= 0:
     raise ValueError("❌ Invalid bounding box size: height or depth is zero")
 
-# Divide Mesh
+# Create vertical dividing plane
 vertical_plane = o3d.geometry.TriangleMesh.create_box(width=0.001, height=plane_height, depth=plane_depth)
 vertical_plane.translate((-0.0005, -plane_height / 2, -plane_depth / 2))
 
 center_x = (bbox.get_min_bound()[0] + bbox.get_max_bound()[0]) / 2
 vertical_plane.translate((center_x, 0, 0))
 
+# Rotate the dividing plane
 angle_from_x = 94.11222884471846
 tilt_angle = angle_from_x - 90
 angle_rad = np.deg2rad(-tilt_angle)
-
 R = vertical_plane.get_rotation_matrix_from_axis_angle([0, 0, angle_rad])
 vertical_plane.rotate(R, center=vertical_plane.get_center())
-vertical_plane.translate((-0.015, 0, 0))
+vertical_plane.translate((-0.015, 0, 0))  # Adjust position
 
-# Cluster Separation
+# === SPLIT INTO ULNA + RADIUS ===
 plane_normal = R @ np.array([1.0, 0.0, 0.0])
 plane_normal /= np.linalg.norm(plane_normal)
 plane_center = vertical_plane.get_center()
@@ -69,9 +73,12 @@ mesh_ulna = mesh.select_by_index(np.where(mask_above)[0].tolist())
 mesh_radius = mesh.select_by_index(np.where(mask_below)[0].tolist())
 meshs = [mesh_ulna, mesh_radius]
 
-# --- Utility Functions ---
+# === UTILITY FUNCTIONS ===
 
 def create_angle_mesh(mesh, angles, split_ratio):
+    """
+    Create angled mesh by rotating parts above and below a split line.
+    """
     vertices = np.asarray(mesh.vertices)
     triangles = np.asarray(mesh.triangles)
     min_y, max_y = vertices[:, 1].min(), vertices[:, 1].max()
@@ -102,8 +109,9 @@ def create_angle_mesh(mesh, angles, split_ratio):
     return top_mesh + bottom_mesh
 
 def get_deformed_part(mesh, split_ratio):
-    if split_ratio is None:
-        return "no break"
+    """
+    Extract central portion near the fracture line.
+    """
     bbox = mesh.get_axis_aligned_bounding_box()
     min_bound = bbox.get_min_bound()
     max_bound = bbox.get_max_bound()
@@ -119,6 +127,9 @@ def get_deformed_part(mesh, split_ratio):
     return mesh.crop(crop_bbox)
 
 def create_xy_projection(points, resolution=512):
+    """
+    Project 3D point cloud onto 2D plane to simulate X-ray.
+    """
     min_vals = points.min(axis=0)
     max_vals = points.max(axis=0)
     norm_points = (points - min_vals) / (max_vals - min_vals + 1e-8)
@@ -131,6 +142,9 @@ def create_xy_projection(points, resolution=512):
     return xy_proj
 
 def simulate_xray(mesh, resolution=512):
+    """
+    Create synthetic X-ray from mesh surface using density projection.
+    """
     mesh.compute_vertex_normals()
     pcd = mesh.sample_points_poisson_disk(number_of_points=100000)
     points = np.asarray(pcd.points)
@@ -149,6 +163,9 @@ def Generate_xray(mesh):
     return simulate_xray(mesh)
 
 def get_segments(meshs):
+    """
+    Randomly choose ulna or radius and apply simulated fracture + x-ray.
+    """
     index = random.randint(0, len(meshs) - 1)
     mesh = meshs[index]
     top_angle = random.randint(0, 60)
@@ -161,6 +178,9 @@ def get_segments(meshs):
     return mesh, bone, top_angle, bottom_angle, split_ratio, x_ray_image
 
 def create_surface_between_lines(coords1, coords2):
+    """
+    Create surface patch between two sets of edge coordinates.
+    """
     assert len(coords1) == len(coords2), "Line point counts must match"
     points = np.vstack((coords1, coords2))
     triangles = []
@@ -175,6 +195,9 @@ def create_surface_between_lines(coords1, coords2):
     return mesh
 
 def get_center_closest_lines_joined(mesh):
+    """
+    Finds closest edge loops in the broken mesh and joins them.
+    """
     mesh.remove_duplicated_vertices()
     mesh.remove_degenerate_triangles()
     mesh.remove_duplicated_triangles()
@@ -232,26 +255,28 @@ def get_center_closest_lines_joined(mesh):
                 break
     matched_coords1 = np.array(matched_coords1)
     matched_coords2 = np.array(matched_coords2)
-    all_points = np.vstack([matched_coords1, matched_coords2])
-    line_set3 = o3d.geometry.LineSet()
-    line_set3.points = o3d.utility.Vector3dVector(all_points)
-    line_set3.lines = o3d.utility.Vector2iVector(connecting_lines)
-    line_set3.paint_uniform_color([0, 0, 1])
     surface = create_surface_between_lines(matched_coords1, matched_coords2)
-    return line_set3, surface
+    return o3d.geometry.LineSet(), surface
 
-# === Main Run Loop ===
+# === MAIN GENERATION LOOP ===
 n = 1
-num_of_samples = 3000
+num_of_samples = 3000  # Reduce for testing: e.g., 5
 for _ in range(num_of_samples):
     mesh, bone, top_angle, bottom_angle, split_ratio, x_ray_image = get_segments(meshs)
+
+    # Save broken mesh
     model_path = f"models/deformed/bone{n}.ply"
     o3d.io.write_triangle_mesh(model_path, mesh)
+
+    # Save x-ray
     cv2.imwrite(f"x-ray images/image{n}.png", x_ray_image)
-    line_set, surface_mesh = get_center_closest_lines_joined(mesh)
+
+    # Create connecting surface + save reconstructed mesh
+    _, surface_mesh = get_center_closest_lines_joined(mesh)
     mesh1 = mesh + surface_mesh
-    model1_path = f"models/normal/bone{n}.ply"
-    # o3d.io.write_triangle_mesh(model1_path, mesh1)  # Optional if you want to save healthy bone
+    # o3d.io.write_triangle_mesh(f"models/normal/bone{n}.ply", mesh1)  # Uncomment if needed
+
+    # Save metadata
     data = {
         "bone": bone,
         "location": split_ratio,
@@ -260,4 +285,5 @@ for _ in range(num_of_samples):
     }
     with open(f"jsons/bone{n}.json", "w") as f:
         json.dump(data, f, indent=4)
+
     n += 1
